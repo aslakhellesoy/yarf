@@ -247,3 +247,5 @@ We should reach out to open source communities as well as people in SmartBear wh
 * Selenium team (Simon Stewart)
 * Tap team
 * Swagger team
+* CI server vendors
+* Maven Surefire team
