@@ -5,6 +5,8 @@ from a variety of test automation tools as well as manual tests.
 
 Test reporting tools that process and display test results typically have multiple requirements:
 
+* Group test results from multiple different testing tools and test executions.
+* Streamable format. Efficient processing of large result sets is important to keep memory consumption low.
 * Generate an aggregated test result for multiple tests
 * Display details for individual tests
 * Support multiple testing tools
@@ -14,7 +16,6 @@ Test reporting tools that process and display test results typically have multip
 * Grouping tests by tags
 * Store test results in a database
 * Compact data format
-* Group test results from multiple different testing tools and test executions.
 
 ## Data format
 
@@ -29,27 +30,36 @@ Below is the format of the `TestNode` objects (in TypeScript) This can be transl
  * A test node is either a leaf in a tree, or a node containing other nodes.
  */
 type TestNode = {
-  // The unique ID of the test node, typically a UUID. This is unique for every test execution and will
-  // *not* be the same for a new execution of the same test.
+  // The ID of the test node. This must be unique within a test execution (message stream).
+  // The ID *may* be different for a new execution of the same test.
   id: string,
   // The ID of the parent node. This is `undefined` for the root node
   parentId?: string
   // A string representing the type of the node. This is specific to the test automation tool.
   type: string,
-  // A reference back to the source code where this node came from. The format of this ID is tool-specific,
-  // but we recommend a format of ./relative/path/to/file:lineNumber or AST Node ID if the source is an AST with node IDs.
+  // A reference back to the source code where this node came from. The format of
+  // this field is a URI. Examples:
+  //   source-reference:file://example.file?line=12&column=13
+  //   source-reference:java:com/example/Example#testMethod()
+  // A separate sub-spec might be needed for these URIs - maybe there is already a spec
+  // or defacto format we can use (like the URLs IDEs print in stack traces).
   sourceRef: string
   // A stable ID that does not change between test execution. This field will be empty until we've built a tool
   // that can compute stable IDs for tests even when its name and line number changes from one revision to another.
   entityId?: string
-  // The name of the test node
+  // The human readable name of the test node. For file system nodes this is the file name. For classes
+  // it is the class name, for methods it is the method name etc.
   name: string,
   // The timestamp of when this node started executing. Only present for leaf nodes.
-  timestamp: Timestamp,
+  // Formatted as an ISO 8601 string (ideally with millisecond precision)
+  timestamp: string,
   // How long it took to execute. Only present for leaf nodes.
   duration?: Duration,
-  // The status of the test execution. Only present for leaf nodes.
-  // Consumers who need aggregated results for parent nodes should compute this at runtime.
+  // The status of the test execution. Must be present for leaf nodes.
+  // The field may be specified by container nodes.
+  // If the field is absent for a container node, consumers should compute this
+  // the aggregated result from child nodes.
+  // TODO: Document the algorithm for computing aggregate results.
   result?: Status,
   // Attachments collected during test execution
   attachments: Attachment[]
@@ -61,22 +71,19 @@ type TestNode = {
  * An attachment represents an arbitrary piece of data attached to a test node. It can be used for images (screenshots), logs etc.
  */
 type Attachment = {
-  // The optional body of the attachment. Not set if `url` is set.
-  body?: string = ''
-  // The content encoding of the body (if set).
-  contentEncoding?: AttachmentContentEncoding
-  // An optional file name
-  fileName?: string
+  // The body of the attachment.
+  body: string
+  // The content encoding of the body.
+  contentEncoding: AttachmentContentEncoding
   // The IANA media type of the body or data behind the url
   mediaType: string
-  // An optional URL from where the contents can be retrieved with a HTTP GET request. Not set if `body` is set.
-  url?: string
 }
 
 enum AttachmentContentEncoding {
-  // The content should be interprented as-is (as text)
+  // The content should be interpreted as-is (as text)
   IDENTITY = 'IDENTITY',
   // The content is binary, encoded with Base64
+  // https://datatracker.ietf.org/doc/html/rfc4648
   BASE64 = 'BASE64',
 }
 
@@ -100,9 +107,9 @@ these representations could be mapped to `TestNode` objects.
 
 ```
 .                                    -> { id: 'a', parentId: undefined, type: 'directory' }
-├── features                         -> { id: 'b', parentId: 'a', type: 'directory' }
-│   └── bar                          -> { id: 'c', parentId: 'b', type: 'directory' }
-│       └── three.feature            -> { id: 'd', parentId: 'c', type: 'file' }
+├── features                         -> { id: 'b', parentId: 'a', type: 'directory', name: 'features' }
+│   └── bar                          -> { id: 'c', parentId: 'b', type: 'directory', name: 'bar' }
+│       └── three.feature            -> { id: 'd', parentId: 'c', type: 'file',      name: 'three.feature' }
 ├── lib                              -> { id: 'e', parentId: 'a', type: 'directory' }
 │   └── spec                         -> { id: 'f', parentId: 'h', type: 'directory' }
 │       └── my_spec.rb               -> { id: 'g', parentId: 'i', type: 'file' }
@@ -118,9 +125,9 @@ these representations could be mapped to `TestNode` objects.
 
 ```gherkin
 # features/bar/three.feature        
-Feature: Three                    #  -> { id: 'n', parentId: 'c', type: 'gherkin-feature' }
-  Scenario: Blah                  #  -> { id: 'o', parentId: 'n', type: 'gherkin-scenario' }
-    Given blah                    #  -> { id: 'p', parentId: 'o', type: 'gherkin-step' }
+Feature: Three                    #  -> { id: 'n', parentId: 'c', type: 'gherkin-feature',  name: 'Feature: Three' }
+  Scenario: Blah                  #  -> { id: 'o', parentId: 'n', type: 'gherkin-scenario', name: 'Scenario: Blah' }
+    Given blah                    #  -> { id: 'p', parentId: 'o', type: 'gherkin-step', name: 'Given blah' }
 
   Scenario Outline: Blah          #  -> { id: 'q', parentId: 'n', type: 'gherkin-scenario-outline' }
     Given <snip>
@@ -130,7 +137,7 @@ Feature: Three                    #  -> { id: 'n', parentId: 'c', type: 'gherkin
       | snip | snap  |
       | red  | green |            #  -> { id: 'r', parentId: 'q', type: 'gherkin-step', status: 'passed' }
                                   #  -> { id: 's', parentId: 'q', type: 'gherkin-step', status: 'failed' }
-  
+
   Rule: Blah                      #  -> { id: 't', parentId: 'n', type: 'gherkin-rule' }
     Scenario: Blah                #  -> { id: 'u', parentId: 't', type: 'gherkin-scenario' }
 ```
@@ -139,9 +146,9 @@ Feature: Three                    #  -> { id: 'n', parentId: 'c', type: 'gherkin
 
 ```java
 // src/test/java/com/bigcorp/MyTest.java
-class MyTest {                   // -> { id: 'v', parentId: 'm' }
+class MyTest {                   // -> { id: 'v', parentId: 'm', name: 'com.bigcorp.MyTest' }
     @Test
-    public void something() {    // -> { id: 'w', parentId: 'v', status: 'passed' }
+    public void something() {    // -> { id: 'w', parentId: 'v', status: 'passed', name: 'something()' }
     }
 }
 ```
@@ -176,8 +183,8 @@ for(const testNode of testNodes) {
 
 ## Mapping to YARF
 
-In order to support the YARF specification, each testing tool will need a corresponding mapping tool that translates the native test
-result format into YARF.
+In order to support the YARF specification, each testing tool will need a
+corresponding mapping tool that translates the native test result format into YARF.
 
 ### Cucumber
 
@@ -209,11 +216,15 @@ render just a `Scenario` deeper in that AST. When we render a `<Step />`, we wan
 AST, but it is present in one of the YARF `TestNode` objects.
 
 This is where the `TestNode#sourceRef` property comes in handy. A `Map<string,TestNode>` map can be built by iterating over the `TestNode`
-objects, and the `<Step />` component could use its `Step#id` to look up the corresponding `TestNode` in that Map. 
+objects, and the `<Step />` component could use its `Step#id` to look up the corresponding `TestNode` in that Map.
 
 ## Stable test IDs
 
-The `TestNode#id` field will be different for each test execution, and should only be used to build a hierarchy of tests.
+Some testing tools (like JUnit) are able to produce the same `TestNode#id` for several executions.
+Some testing tools (like Cucumber) do not have this ability.
+
+Since the `TestNode#id` field *may* be different for each test execution, it should only be used to build
+a hierarchy of tests, and not for tracking the test across multiple exec
 
 Some systems may want to report on the "flakiness" of a test over time, across multiple revisions of that test. For example, a test named
 `my_little_test` on line `48` in revision `r10` may have moved to line `56` in `r11`, and in `r12` it may have been renamed to `my_medium_test`.
